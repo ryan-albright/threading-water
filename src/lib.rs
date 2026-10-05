@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, mpsc}, 
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 
@@ -21,7 +21,7 @@ impl ThreadPool {
     pub fn new(size: usize) -> ThreadPool {
         assert!(size > 0);
 
-        let (sender, receiver) = mpsc::channel(); 
+        let (sender, receiver) = mpsc::channel();
 
         let receiver = Arc::new(Mutex::new(receiver));
 
@@ -31,9 +31,9 @@ impl ThreadPool {
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
-        ThreadPool { 
-            workers, 
-            sender: Some(sender), 
+        ThreadPool {
+            workers,
+            sender: Some(sender),
         }
     }
 
@@ -41,7 +41,7 @@ impl ThreadPool {
     // }
 
     pub fn execute<F>(&self, f: F)
-    where 
+    where
         F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f);
@@ -68,13 +68,13 @@ struct Worker {
 }
 
 impl Worker {
-    // below method will panic if there are not enough system resources 
-    // and will cause the whole server to panic. For prod, use 
+    // below method will panic if there are not enough system resources
+    // and will cause the whole server to panic. For prod, use
     // std::thread::Builder and its spawn method returning Result instead
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || {
             loop {
-                // change unwrap to an expect if a lock fails 
+                // change unwrap to an expect if a lock fails
                 let message = receiver.lock().unwrap().recv();
 
                 match message {
@@ -101,7 +101,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    #[should_panic(expected="assertion failed: size > 0")]
+    #[should_panic(expected = "assertion failed: size > 0")]
     fn panics_on_zero() {
         let _ = ThreadPool::new(0);
     }
