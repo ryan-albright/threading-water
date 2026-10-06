@@ -2,9 +2,8 @@ use std::{
     fs,
     io::{BufReader, prelude::*},
     net::{TcpListener, TcpStream},
-    thread,
+    process, thread,
     time::Duration,
-    process,
 };
 
 use server::ThreadPool;

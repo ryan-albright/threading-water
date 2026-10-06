@@ -55,9 +55,12 @@ impl Drop for ThreadPool {
         drop(self.sender.take());
 
         for worker in self.workers.drain(..) {
-            println!("Shutting down worker {}", worker.id);
+            let id = worker.id;
+            println!("Shutting down worker {id}");
 
-            worker.thread.join().unwrap();
+            if let Err(e) = worker.thread.join() {
+                eprintln!("Worker {id} panicked {e:?}");
+            }
         }
     }
 }
@@ -98,7 +101,10 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        time::Duration,
+    };
 
     #[test]
     #[should_panic(expected = "assertion failed: size > 0")]
@@ -114,5 +120,14 @@ mod tests {
         pool.execute(move || tx.send(()).unwrap());
         let status = rx.recv_timeout(Duration::from_secs(1));
         assert!(status.is_ok());
+    }
+
+    #[test]
+    fn drop_survives_a_panicked_worker() {
+        let pool = ThreadPool::new(1);
+        pool.execute(|| panic!("test: worker job panicking on purpose"));
+
+        let status = catch_unwind(AssertUnwindSafe(|| drop(pool)));
+        assert!(status.is_ok())
     }
 }
