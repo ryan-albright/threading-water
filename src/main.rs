@@ -23,7 +23,10 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                pool.execute(|| handle_connection(s));
+                if let Err(e) = pool.execute(|| handle_connection(s)) {
+                    eprintln!("Failed to execute {e}");
+                    break;
+                }
             }
             Err(e) => {
                 eprintln!("Encountered error {e}");
