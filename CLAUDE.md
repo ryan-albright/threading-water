@@ -50,17 +50,34 @@ worker), and `execute` returns `Result<(), PoolFailure>`. Workers wrap each job
 in `catch_unwind(AssertUnwindSafe(job))`, so a panicking job is logged and the
 worker keeps running instead of dying.
 
-`main.rs` no longer uses `.unwrap()` on I/O: bind failure exits with code 1, bad
-requests and file/write errors are logged to stderr, and a missing page yields a
-500 response.
+Construction is fallible: `ThreadPool::build(size) -> Result<ThreadPool,
+PoolFailure>` replaced `new` (which panicked on size 0). `Worker::new` returns
+`io::Result<Worker>` and spawns via `thread::Builder` with the name
+`worker {id}`, so an OS spawn failure propagates with `?` instead of panicking.
+
+`PoolFailure` variants are `InvalidSize` (size 0), `Creation(io::Error)` (a
+worker thread could not be spawned), `NoWorkers` and `ShuttingDown`. It
+implements `Display`, `std::error::Error` and `From<io::Error>` (which maps to
+`Creation`). Convention used: `Display` describes only that layer, and the
+underlying cause is exposed through `source()`, not repeated in the message.
+Whoever reports the error walks the `source()` chain.
+
+`main.rs` no longer uses `.unwrap()` on I/O: bind failure and pool-build failure
+exit with code 1 (the build failure prints the error and then its `source()`
+chain), bad requests and file/write errors are logged to stderr, and a missing
+page yields a 500 response.
 
 Known loose ends (deliberate, not bugs to fix unprompted):
 
 - `PoolFailure::NoWorkers` and `ShuttingDown`: `NoWorkers` is effectively
-  unreachable through the public API now that workers survive panics, and
-  `ShuttingDown` is unused. Their meaning needs a design decision.
-- `Worker::new` uses `thread::spawn`, which panics if the OS can't create a
-  thread. `ThreadPool::build` (returning `Result`) is a commented-out stub.
+  unreachable through the public API now that workers survive panics and
+  `build` rejects size 0, and `ShuttingDown` is unused. Their meaning needs a
+  design decision, and `ShuttingDown` only becomes meaningful alongside a
+  `shutdown(&mut self)` method (see the `FUTURE` item below).
+- If `build` fails partway (e.g. worker 3 of 4 cannot spawn), the already
+  spawned workers are not joined. The sender is dropped on the early return,
+  so they exit on their own, but they are detached. Constructing the
+  `ThreadPool` first and pushing workers into it would let `Drop` join them.
 - A `FUTURE` comment above `impl Drop for ThreadPool` sketches a
   `shutdown(&mut self) -> Vec<usize>` method that returns the ids of workers
   that panicked, with `Drop` as a thin wrapper. Its "pick up alongside worker
@@ -83,6 +100,13 @@ write the test, watch it fail for the right reason, then fix the code. When a
 fix changes behaviour, check whether an older test now passes trivially or
 describes the old behaviour (e.g. `drop_survives_a_panicked_worker` no longer
 exercises the `join()` error path now that jobs can't kill a worker).
+
+Tests also cover the error plumbing: `build(0)` yields `InvalidSize`,
+`io::Error` converts into `Creation` and `source()` returns it, and spawned
+workers carry the expected thread name. Because a wrong thread name or a
+`source()` that returns `None` still compiles, verify each such test by
+temporarily breaking the code and confirming the test goes red. Use `matches!`
+for `PoolFailure` assertions, since it is not `PartialEq` (`io::Error` isn't).
 
 Prefer deterministic synchronisation over sleeps. For "all workers have reached
 a known point", have each job send on a channel *before* it panics, then
