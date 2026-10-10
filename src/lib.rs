@@ -1,5 +1,5 @@
 use std::{
-    fmt,
+    fmt, io,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, mpsc},
     thread,
@@ -14,7 +14,8 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 
 #[derive(Debug)]
 pub enum PoolFailure {
-    Creation,
+    InvalidSize,
+    Creation(io::Error),
     NoWorkers,
     ShuttingDown,
 }
@@ -22,10 +23,26 @@ pub enum PoolFailure {
 impl fmt::Display for PoolFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PoolFailure::Creation => write!(f, "Pool instantiation failed"),
+            PoolFailure::InvalidSize => write!(f, "Pool size cannot be zero"),
+            PoolFailure::Creation(_) => write!(f, "Pool instantiation failed"),
             PoolFailure::NoWorkers => write!(f, "No workers in pool"),
             PoolFailure::ShuttingDown => write!(f, "Pool shutting down"),
         }
+    }
+}
+
+impl std::error::Error for PoolFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PoolFailure::Creation(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for PoolFailure {
+    fn from(value: io::Error) -> Self {
+        PoolFailure::Creation(value)
     }
 }
 
@@ -34,30 +51,27 @@ impl ThreadPool {
     ///
     /// The size is the number of threads in the pool.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    ///The 'new' function will panic if the size is zero.
-    pub fn new(size: usize) -> ThreadPool {
-        assert!(size > 0);
+    /// The 'build' function will return InvalidSize error if the size is zero.
+    pub fn build(size: usize) -> Result<ThreadPool, PoolFailure> {
+        if size == 0 {
+            Err(PoolFailure::InvalidSize)
+        } else {
+            let (tx, rx) = mpsc::channel();
+            let rx = Arc::new(Mutex::new(rx));
+            let mut workers = Vec::with_capacity(size);
 
-        let (sender, receiver) = mpsc::channel();
+            for id in 0..size {
+                workers.push(Worker::new(id, Arc::clone(&rx))?);
+            }
 
-        let receiver = Arc::new(Mutex::new(receiver));
-
-        let mut workers = Vec::with_capacity(size);
-
-        for id in 0..size {
-            workers.push(Worker::new(id, Arc::clone(&receiver)));
-        }
-
-        ThreadPool {
-            workers,
-            sender: Some(sender),
+            Ok(ThreadPool {
+                workers,
+                sender: Some(tx),
+            })
         }
     }
-
-    // pub fn build(size: usize) -> Result<ThreadPool, PoolCreationError> {
-    // }
 
     pub fn execute<F>(&self, f: F) -> Result<(), PoolFailure>
     where
@@ -118,11 +132,9 @@ struct Worker {
 }
 
 impl Worker {
-    // below method will panic if there are not enough system resources
-    // and will cause the whole server to panic. For prod, use
-    // std::thread::Builder and its spawn method returning Result instead
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
-        let thread = thread::spawn(move || {
+    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> io::Result<Worker> {
+        let builder = thread::Builder::new().name(format!("worker {id}"));
+        let thread = builder.spawn(move || {
             loop {
                 let message = receiver
                     .lock()
@@ -143,9 +155,9 @@ impl Worker {
                     }
                 }
             }
-        });
+        })?;
 
-        Worker { id, thread }
+        Ok(Worker { id, thread })
     }
 }
 
@@ -153,19 +165,38 @@ impl Worker {
 mod tests {
     use super::*;
     use std::{
-        sync::atomic::{AtomicUsize, Ordering},
-        time::Duration,
+        error::Error, sync::atomic::{AtomicUsize, Ordering}, time::Duration,
     };
 
     #[test]
-    #[should_panic(expected = "assertion failed: size > 0")]
-    fn panics_on_zero() {
-        let _ = ThreadPool::new(0);
+    fn worker_name_valid() {
+        let (tx, rx) = mpsc::channel();
+        let rx = Arc::new(Mutex::new(rx));
+        let test_worker = Worker::new(1, rx).unwrap();
+        let test_worker_name = test_worker.thread.thread().name();
+        drop(tx);
+        assert!(test_worker_name == Some("worker 1"))
+    }
+
+    #[test]
+    fn build_rejects_zero_size() {
+        assert!(matches!(
+            ThreadPool::build(0),
+            Err(PoolFailure::InvalidSize)
+        ));
+    }
+
+    #[test]
+    fn io_error_converts() {
+        let io_error = io::Error::other("test io error");
+        let converted_error = io_error.into();
+        assert!(matches!(converted_error, PoolFailure::Creation(_)));
+        assert!(converted_error.source().is_some())
     }
 
     #[test]
     fn execute_runs_the_closure() {
-        let pool = ThreadPool::new(1);
+        let pool = ThreadPool::build(1).unwrap();
         let (tx, rx) = mpsc::channel();
 
         pool.execute(move || tx.send(()).unwrap()).unwrap();
@@ -175,7 +206,7 @@ mod tests {
 
     #[test]
     fn drop_survives_a_panicked_worker() {
-        let pool = ThreadPool::new(1);
+        let pool = ThreadPool::build(1).unwrap();
         pool.execute(|| panic!("test: worker job panicking on purpose"))
             .unwrap();
 
@@ -185,7 +216,7 @@ mod tests {
 
     #[test]
     fn pool_runs_jobs_after_one_worker_panics() {
-        let pool = ThreadPool::new(2);
+        let pool = ThreadPool::build(2).unwrap();
         pool.execute(|| panic!("test: worker job panicking on purpose"))
             .unwrap();
 
@@ -209,7 +240,7 @@ mod tests {
     #[test]
     fn pool_runs_jobs_after_all_workers_panic() {
         const WORKER_COUNT: usize = 3;
-        let pool = ThreadPool::new(WORKER_COUNT);
+        let pool = ThreadPool::build(WORKER_COUNT).unwrap();
         let (tx, rx) = mpsc::channel();
 
         for _ in 0..WORKER_COUNT {

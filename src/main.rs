@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     fs,
     io::{BufReader, prelude::*},
     net::{TcpListener, TcpStream},
@@ -10,7 +11,7 @@ use server::ThreadPool;
 
 fn main() {
     let port = "127.0.0.1:7878";
-    let listener = match TcpListener::bind(&port) {
+    let listener = match TcpListener::bind(port) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("Unable to bind at {port} {e}");
@@ -18,7 +19,18 @@ fn main() {
         }
     };
 
-    let pool = ThreadPool::new(4);
+    let pool = match ThreadPool::build(4) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            let mut next_error = e.source();
+            while let Some(new_error) = next_error {
+                eprintln!("{new_error}");
+                next_error = new_error.source()
+            }
+            process::exit(1)
+        }
+    };
 
     for stream in listener.incoming() {
         match stream {
