@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, mpsc},
     thread,
 };
@@ -64,13 +65,38 @@ impl ThreadPool {
     {
         let job = Box::new(f);
 
-        match self.sender.as_ref().expect("Access sender").send(job) {
+        match self
+            .sender
+            .as_ref()
+            .expect("Sender should be accessible")
+            .send(job)
+        {
             Ok(_s) => Ok(()),
             Err(_e) => Err(PoolFailure::NoWorkers),
         }
     }
 }
 
+// FUTURE (pick up alongside worker respawning):
+//
+// Today the outcome of each worker's `join()` is only printed with `eprintln!`,
+// so nothing (a test, a caller, a supervisor) can observe *which* workers
+// panicked. `Drop` can't return a value, so the fix is to move the shutdown
+// logic out of `Drop` into a method whose result is observable:
+//
+//   pub fn shutdown(&mut self) -> Vec<usize>   // ids of workers that panicked
+//
+// - `shutdown` takes the sender (closing the channel), drains and joins every
+//   worker, and collects the ids whose `join()` returned `Err`. It must be
+//   idempotent: a second call finds no sender and no workers, returns `vec![]`.
+// - `Drop` becomes a thin wrapper that calls `self.shutdown()` and logs the
+//   result, so existing behaviour is unchanged.
+// - Tests can then call `shutdown()` directly and assert on the returned ids
+//   (e.g. `[0]`) instead of using an unwind-guard plus a sleep to prove the
+//   dead worker was joined.
+// - Consider a richer return type (`Vec<(usize, Box<dyn Any + Send>)>`, or a
+//   small struct) if the panic payload is wanted. Decide once respawning shows
+//   what a supervisor actually needs to know.
 impl Drop for ThreadPool {
     fn drop(&mut self) {
         drop(self.sender.take());
@@ -98,13 +124,18 @@ impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || {
             loop {
-                let message = receiver.lock().expect("Message received").recv();
+                let message = receiver
+                    .lock()
+                    .expect("Receiver mutex should not be poisoned")
+                    .recv();
 
                 match message {
                     Ok(job) => {
                         println!("Worker {id} got a job; executing.");
 
-                        job();
+                        if catch_unwind(AssertUnwindSafe(job)).is_err() {
+                            eprintln!("Worker {id} survived panic.");
+                        };
                     }
                     Err(_) => {
                         println!("Worker {id} disconnected; shutting down.");
@@ -122,8 +153,8 @@ impl Worker {
 mod tests {
     use super::*;
     use std::{
-        panic::{AssertUnwindSafe, catch_unwind},
-        time::{Duration, Instant},
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
     };
 
     #[test]
@@ -153,25 +184,49 @@ mod tests {
     }
 
     #[test]
-    fn execute_reports_no_workers_when_all_workers_died() {
-        let pool = ThreadPool::new(1);
+    fn pool_runs_jobs_after_one_worker_panics() {
+        let pool = ThreadPool::new(2);
         pool.execute(|| panic!("test: worker job panicking on purpose"))
             .unwrap();
-        let few_ms = Duration::from_millis(3);
-        let now = Instant::now();
 
-        loop {
-            let result = pool.execute(|| ());
-            if matches!(result, Err(PoolFailure::NoWorkers)) {
-                break;
-            }
-            if now.elapsed() > Duration::from_secs(1) {
-                panic!("execute never reported NoWorkers after a worker panic");
-            }
-            thread::sleep(few_ms);
+        let counter = Arc::new(AtomicUsize::new(0));
+        const EXPECTED_VAL: usize = 5;
+        for _ in 0..EXPECTED_VAL {
+            let counter = Arc::clone(&counter);
+            pool.execute(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            })
+            .unwrap();
         }
+
+        let status = catch_unwind(AssertUnwindSafe(|| drop(pool)));
+        assert!(status.is_ok());
+
+        let val = counter.load(Ordering::Relaxed);
+        assert_eq!(val, EXPECTED_VAL);
     }
 
-    // todo: add a test that confirms pool with n > 1 cleans up later
-    // workers if one worker panics
+    #[test]
+    fn pool_runs_jobs_after_all_workers_panic() {
+        const WORKER_COUNT: usize = 3;
+        let pool = ThreadPool::new(WORKER_COUNT);
+        let (tx, rx) = mpsc::channel();
+
+        for _ in 0..WORKER_COUNT {
+            let tx = tx.clone();
+            pool.execute(move || {
+                tx.send("test job").expect("Sender should send job");
+                panic!("test: worker job panicking on purpose");
+            })
+            .unwrap();
+            let status = rx.recv_timeout(Duration::from_secs(1));
+            assert!(status.is_ok());
+        }
+
+        let (tx, rx) = mpsc::channel();
+        pool.execute(move || tx.send(()).unwrap())
+            .expect("Pool should accept jobs");
+        let status = rx.recv_timeout(Duration::from_secs(1));
+        assert!(status.is_ok());
+    }
 }
