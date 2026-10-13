@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     fmt, io,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, mpsc},
@@ -79,49 +80,45 @@ impl ThreadPool {
     {
         let job = Box::new(f);
 
-        match self
-            .sender
-            .as_ref()
-            .expect("Sender should be accessible")
-            .send(job)
-        {
-            Ok(_s) => Ok(()),
-            Err(_e) => Err(PoolFailure::NoWorkers),
+        match self.sender.as_ref() {
+            Some(s) => s.send(job).map_err(|_| PoolFailure::NoWorkers),
+            None => Err(PoolFailure::ShuttingDown),
         }
     }
-}
 
-// FUTURE (pick up alongside worker respawning):
-//
-// Today the outcome of each worker's `join()` is only printed with `eprintln!`,
-// so nothing (a test, a caller, a supervisor) can observe *which* workers
-// panicked. `Drop` can't return a value, so the fix is to move the shutdown
-// logic out of `Drop` into a method whose result is observable:
-//
-//   pub fn shutdown(&mut self) -> Vec<usize>   // ids of workers that panicked
-//
-// - `shutdown` takes the sender (closing the channel), drains and joins every
-//   worker, and collects the ids whose `join()` returned `Err`. It must be
-//   idempotent: a second call finds no sender and no workers, returns `vec![]`.
-// - `Drop` becomes a thin wrapper that calls `self.shutdown()` and logs the
-//   result, so existing behaviour is unchanged.
-// - Tests can then call `shutdown()` directly and assert on the returned ids
-//   (e.g. `[0]`) instead of using an unwind-guard plus a sleep to prove the
-//   dead worker was joined.
-// - Consider a richer return type (`Vec<(usize, Box<dyn Any + Send>)>`, or a
-//   small struct) if the panic payload is wanted. Decide once respawning shows
-//   what a supervisor actually needs to know.
-impl Drop for ThreadPool {
-    fn drop(&mut self) {
+    pub fn shutdown(&mut self) -> Vec<(usize, String)> {
         drop(self.sender.take());
+        let mut panicked_workers: Vec<(usize, String)> = Vec::new();
 
         for worker in self.workers.drain(..) {
             let id = worker.id;
-            println!("Shutting down worker {id}");
 
             if let Err(e) = worker.thread.join() {
-                eprintln!("Worker {id} panicked {e:?}");
+                let msg = err_to_string(e.as_ref());
+                panicked_workers.push((id, msg));
             }
+        }
+        panicked_workers
+    }
+}
+
+fn err_to_string(err: &dyn Any) -> String {
+    // rewrite this with map/unwrap_or
+    if let Some(s) = err.downcast_ref::<&str>() {
+        String::from(*s)
+    } else if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string payload error".to_string()
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        let err_worker_ids = self.shutdown();
+
+        for (id, msg) in err_worker_ids {
+            eprintln!("Worker {id:?} panicked: {msg}");
         }
     }
 }
@@ -165,7 +162,9 @@ impl Worker {
 mod tests {
     use super::*;
     use std::{
-        error::Error, sync::atomic::{AtomicUsize, Ordering}, time::Duration,
+        error::Error,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
     };
 
     #[test]
