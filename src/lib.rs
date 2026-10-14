@@ -259,4 +259,37 @@ mod tests {
         let status = rx.recv_timeout(Duration::from_secs(1));
         assert!(status.is_ok());
     }
+
+    #[test]
+    fn execute_on_shutdown_pool_returns_shutting_down() {
+        let mut pool = ThreadPool::build(3).unwrap();
+        let (tx, _) = mpsc::channel();
+
+        pool.shutdown();
+        let status = pool.execute(move || tx.send(()).unwrap()).err();
+        assert!(matches!(status, Some(PoolFailure::ShuttingDown)))
+    }
+
+    #[test]
+    fn pool_shutdown_idempotent() {
+        let mut pool = ThreadPool::build(3).unwrap();
+
+        let result_1 = pool.shutdown();
+        assert!(result_1.is_empty());
+
+        let result_2 = pool.shutdown();
+        assert!(result_2.is_empty());
+    }
+
+    #[test]
+    fn err_to_string_works() {
+        let box_str = Box::new("boom");
+        assert_eq!(err_to_string(box_str.as_ref()), "boom");
+
+        let box_string = Box::new("boom".to_string());
+        assert_eq!(err_to_string(box_string.as_ref()), "boom");
+
+        let box_non_string = Box::new(37);
+        assert_eq!(err_to_string(&box_non_string), "non-string payload error");
+    }
 }
