@@ -1,9 +1,14 @@
 use std::{
     error::Error,
     fs,
-    io::{BufReader, prelude::*},
+    io::{self, BufReader, prelude::*},
     net::{TcpListener, TcpStream},
-    process, thread,
+    process,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, sleep},
     time::Duration,
 };
 
@@ -32,16 +37,45 @@ fn main() {
         }
     };
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(s) => {
-                if let Err(e) = pool.execute(|| handle_connection(s)) {
+    let shutdown_requested: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    // optional for linux systems
+    if let Err(e) = listener.set_nonblocking(true) {
+        eprintln!("Failed to set non-blocking: {e}");
+        process::exit(1)
+    }
+
+    let for_thread = shutdown_requested.clone();
+    thread::spawn(move || {
+        let lines = io::stdin().lines();
+        for line in lines {
+            match line {
+                Ok(l) => {
+                    if l.trim() == "q" {
+                        for_thread.store(true, Ordering::Relaxed)
+                    };
+                }
+                Err(_) => {
+                    for_thread.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        for_thread.store(true, Ordering::Relaxed);
+    });
+
+    while !shutdown_requested.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((socket, _)) => {
+                if let Err(e) = pool.execute(|| handle_connection(socket)) {
                     eprintln!("Failed to execute {e}");
                     break;
                 }
             }
             Err(e) => {
-                eprintln!("Encountered error {e}");
+                if e.kind() == io::ErrorKind::WouldBlock {
+                    sleep(Duration::from_millis(50));
+                } else {
+                    eprintln!("Encountered error: {e}");
+                }
             }
         }
     }
