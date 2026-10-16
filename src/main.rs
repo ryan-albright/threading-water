@@ -24,7 +24,7 @@ fn main() {
         }
     };
 
-    let pool = match ThreadPool::build(4) {
+    let mut pool = match ThreadPool::build(4) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
@@ -80,7 +80,19 @@ fn main() {
         }
     }
 
-    println!("Shutting down.");
+    println!("Shutting down...");
+    let report = pool.shutdown_timeout(Duration::from_secs(2));
+    for (id, msg) in &report.panicked_workers {
+        eprintln!("worker {id} panicked during shutdown: {msg}");
+    }
+
+    for id in &report.timed_out_workers {
+        eprintln!("worker {id} timed out; job abandoned");
+    }
+    println!("Shutdown complete.");
+    if !report.timed_out_workers.is_empty() || !report.panicked_workers.is_empty() {
+        process::exit(1)
+    }
 }
 
 fn handle_connection(mut stream: TcpStream) {

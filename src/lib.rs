@@ -2,13 +2,23 @@ use std::{
     any::Any,
     fmt, io,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, RecvTimeoutError},
+    },
     thread,
+    time::{Duration, Instant},
 };
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: Option<mpsc::Sender<Job>>,
+    job_sender: Option<mpsc::Sender<Job>>,
+    done_receiver: mpsc::Receiver<usize>,
+}
+
+pub struct ShutdownReport {
+    pub panicked_workers: Vec<(usize, String)>,
+    pub timed_out_workers: Vec<usize>,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -60,16 +70,18 @@ impl ThreadPool {
             Err(PoolFailure::InvalidSize)
         } else {
             let (tx, rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
             let rx = Arc::new(Mutex::new(rx));
             let mut workers = Vec::with_capacity(size);
 
             for id in 0..size {
-                workers.push(Worker::new(id, Arc::clone(&rx))?);
+                workers.push(Worker::new(id, Arc::clone(&rx), done_tx.clone())?);
             }
 
             Ok(ThreadPool {
                 workers,
-                sender: Some(tx),
+                job_sender: Some(tx),
+                done_receiver: done_rx,
             })
         }
     }
@@ -80,14 +92,14 @@ impl ThreadPool {
     {
         let job = Box::new(f);
 
-        match self.sender.as_ref() {
+        match self.job_sender.as_ref() {
             Some(s) => s.send(job).map_err(|_| PoolFailure::NoWorkers),
             None => Err(PoolFailure::ShuttingDown),
         }
     }
 
     pub fn shutdown(&mut self) -> Vec<(usize, String)> {
-        drop(self.sender.take());
+        drop(self.job_sender.take());
         let mut panicked_workers: Vec<(usize, String)> = Vec::new();
 
         for worker in self.workers.drain(..) {
@@ -99,6 +111,41 @@ impl ThreadPool {
             }
         }
         panicked_workers
+    }
+
+    pub fn shutdown_timeout(&mut self, time_limit: Duration) -> ShutdownReport {
+        drop(self.job_sender.take());
+
+        let mut finished_workers = Vec::new();
+        let deadline = Instant::now() + time_limit;
+        while finished_workers.len() < self.workers.len() {
+            let remaining_time = deadline.saturating_duration_since(Instant::now());
+            match self.done_receiver.recv_timeout(remaining_time) {
+                Ok(v) => finished_workers.push(v),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        let mut panicked_workers: Vec<(usize, String)> = Vec::new();
+        let mut timed_out_workers = Vec::new();
+
+        for worker in self.workers.drain(..) {
+            let id = worker.id;
+
+            if finished_workers.contains(&id) {
+                if let Err(e) = worker.thread.join() {
+                    let msg = err_to_string(e.as_ref());
+                    panicked_workers.push((id, msg));
+                }
+            } else {
+                timed_out_workers.push(id);
+            }
+        }
+        ShutdownReport {
+            panicked_workers,
+            timed_out_workers,
+        }
     }
 }
 
@@ -129,7 +176,11 @@ struct Worker {
 }
 
 impl Worker {
-    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> io::Result<Worker> {
+    fn new(
+        id: usize,
+        receiver: Arc<Mutex<mpsc::Receiver<Job>>>,
+        sender: mpsc::Sender<usize>,
+    ) -> io::Result<Worker> {
         let builder = thread::Builder::new().name(format!("worker {id}"));
         let thread = builder.spawn(move || {
             loop {
@@ -148,12 +199,14 @@ impl Worker {
                     }
                     Err(_) => {
                         println!("Worker {id} disconnected; shutting down.");
+                        // only covers the simple case, not the mutex being poisoned
+                        // replace with a Drop in the future
+                        let _ = sender.send(id);
                         break;
                     }
                 }
             }
         })?;
-
         Ok(Worker { id, thread })
     }
 }
@@ -164,14 +217,14 @@ mod tests {
     use std::{
         error::Error,
         sync::atomic::{AtomicUsize, Ordering},
-        time::Duration,
     };
 
     #[test]
     fn worker_name_valid() {
         let (tx, rx) = mpsc::channel();
+        let (done_tx, _) = mpsc::channel();
         let rx = Arc::new(Mutex::new(rx));
-        let test_worker = Worker::new(1, rx).unwrap();
+        let test_worker = Worker::new(1, rx, done_tx).unwrap();
         let test_worker_name = test_worker.thread.thread().name();
         drop(tx);
         assert!(test_worker_name == Some("worker 1"))
@@ -279,6 +332,73 @@ mod tests {
 
         let result_2 = pool.shutdown();
         assert!(result_2.is_empty());
+    }
+
+    #[test]
+    fn shutdown_timeout_records_stuck_worker() {
+        let mut pool = ThreadPool::build(1).unwrap();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+
+        let _ = pool.execute(move || {
+            let _ = gate_rx.recv();
+        });
+
+        let report = pool.shutdown_timeout(Duration::from_millis(100));
+        assert_eq!(report.timed_out_workers, vec![0]);
+        gate_tx.send(()).unwrap()
+    }
+
+    #[test]
+    fn shutdown_timeout_reports_nothing_when_jobs_finish() {
+        const WORKER_COUNT: usize = 3;
+        let mut pool = ThreadPool::build(WORKER_COUNT).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        for _ in 0..WORKER_COUNT {
+            let tx = tx.clone();
+            pool.execute(move || tx.send(()).unwrap()).unwrap();
+        }
+
+        for _ in 0..WORKER_COUNT {
+            assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        }
+
+        let report = pool.shutdown_timeout(Duration::from_secs(5));
+        assert!(report.timed_out_workers.is_empty());
+        assert!(report.panicked_workers.is_empty());
+    }
+
+    #[test]
+    fn shutdown_timeout_separates_workers() {
+        let mut pool = ThreadPool::build(2).unwrap();
+        let (name_tx, name_rx) = mpsc::channel();
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+
+        let _ = pool.execute(move || {
+            let current_thread = thread::current();
+            let _ = name_tx.send(
+                current_thread
+                    .name()
+                    .expect("job should report its worker name")
+                    .to_string(),
+            );
+            let _ = gate_rx.recv();
+        });
+
+        let stuck_worker_name = name_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let stuck_worker_id = stuck_worker_name
+            .strip_prefix("worker ")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+
+        // todo: call the shutdown in a seperate timeout to avoid test hanging in case loop is changed
+
+        let report = pool.shutdown_timeout(Duration::from_millis(100));
+        assert_eq!(report.timed_out_workers, vec![stuck_worker_id]);
+        assert!(report.panicked_workers.is_empty());
+
+        gate_tx.send(()).unwrap()
     }
 
     #[test]
