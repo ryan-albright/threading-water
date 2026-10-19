@@ -62,8 +62,15 @@ Shutdown has two forms, both taking `&mut self` and both idempotent (they drain
   Vec<(usize, String)>` and `timed_out_workers: Vec<usize>`.
 
 How the deadline works: each `Worker` gets a clone of a `Sender<usize>` and
-sends its id on a "done" channel as its loop ends (when `recv()` on the job
-channel returns `Err`). The pool keeps the `Receiver` as `done_receiver`.
+sends its id on a "done" channel when its thread closure ends, however it ends.
+A private `DoneGuard` (id plus `Sender<usize>`) is created first in the closure
+and sends the id from its `Drop`, so a normal exit (`recv()` on the job channel
+returns `Err`) and an unwinding panic (the `.expect` on a poisoned receiver
+mutex, outside `catch_unwind`) both report. The id is sent during unwinding,
+but `join` waits out the last instructions, so the panic payload reaches
+`panicked_workers`. The guard ignores a failed send: it only fails when the
+pool has dropped `done_receiver`, e.g. an abandoned worker finishing late.
+The pool keeps the `Receiver` as `done_receiver`.
 `shutdown_timeout` calls `recv_timeout` with the time remaining until the
 deadline and stops on either a timeout or a disconnect, so the workers it heard
 from are safe to `join` without blocking. The rest are *abandoned*: their
@@ -113,11 +120,6 @@ Known loose ends (deliberate, not bugs to fix unprompted):
   spawned workers are not joined. The sender is dropped on the early return,
   so they exit on their own, but they are detached. Constructing the
   `ThreadPool` first and pushing workers into it would let `Drop` join them.
-- A worker sends its id only on the normal exit path. If it dies another way
-  (the `.expect` on the poisoned receiver mutex runs outside `catch_unwind`),
-  the id is never sent, so `shutdown_timeout` reports it as timed out and its
-  panic payload is lost because it is never joined. A guard struct whose `Drop`
-  sends the id would cover both exits.
 - Abandoned workers are not cancelled. They keep running until the process
   exits, which kills them mid-request.
 - Only `q` on stdin triggers shutdown. SIGINT/SIGTERM (Ctrl-C) are not handled;

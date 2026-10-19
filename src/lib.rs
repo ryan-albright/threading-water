@@ -175,6 +175,20 @@ struct Worker {
     thread: thread::JoinHandle<()>,
 }
 
+struct DoneGuard {
+    id: usize,
+    sender: mpsc::Sender<usize>,
+}
+
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        if let Err(_) = self.sender.send(self.id) {
+            let id = self.id;
+                eprintln!("worker {id}: pool stopped listening")
+        }
+    }
+}
+
 impl Worker {
     fn new(
         id: usize,
@@ -183,6 +197,7 @@ impl Worker {
     ) -> io::Result<Worker> {
         let builder = thread::Builder::new().name(format!("worker {id}"));
         let thread = builder.spawn(move || {
+            let _guard = DoneGuard { id, sender };
             loop {
                 let message = receiver
                     .lock()
@@ -199,9 +214,6 @@ impl Worker {
                     }
                     Err(_) => {
                         println!("Worker {id} disconnected; shutting down.");
-                        // only covers the simple case, not the mutex being poisoned
-                        // replace with a Drop in the future
-                        let _ = sender.send(id);
                         break;
                     }
                 }
@@ -228,6 +240,23 @@ mod tests {
         let test_worker_name = test_worker.thread.thread().name();
         drop(tx);
         assert!(test_worker_name == Some("worker 1"))
+    }
+
+    #[test]
+    fn poisoned_mutex_returns_id() {
+        let (_, rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let rx = Arc::new(Mutex::new(rx));
+        let thread_mutex = Arc::clone(&rx);
+        let handle = thread::spawn(move || {
+            let _guard = thread_mutex.lock().unwrap();
+            panic!("test: Poisoning the mutex");
+        });
+        _ = handle.join();
+
+        let test_worker = Worker::new(0, rx, done_tx).unwrap();
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
+        assert!(test_worker.thread.join().is_err());
     }
 
     #[test]

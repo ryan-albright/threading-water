@@ -84,8 +84,9 @@ There are two forms. Both take `&mut self` and are idempotent.
 - `shutdown_timeout(Duration)` does the same drain under one overall deadline
   and returns a `ShutdownReport { panicked_workers, timed_out_workers }`.
 
-The deadline works through a "done" channel. Each worker sends its id as its
-loop ends, and `shutdown_timeout` calls `recv_timeout` with the time remaining.
+The deadline works through a "done" channel. Each worker sends its id when its
+thread ends, on any exit path (a small guard struct does the send in its
+`Drop`), and `shutdown_timeout` calls `recv_timeout` with the time remaining.
 Workers it heard from are safe to `join`. The rest are *abandoned*: their
 `JoinHandle` is dropped, which detaches the thread, because std can't cancel a
 thread. Jobs already queued still run first, so the deadline also bounds a
@@ -144,10 +145,6 @@ These are deliberate and documented rather than overlooked:
 - If `build` fails partway (say worker 3 of 4 can't spawn), the workers that did
   start are detached rather than joined. Constructing the pool first and
   pushing workers into it would let `Drop` join them.
-- A worker reports its id only on the normal exit path. If it dies another way
-  (the `.expect` on a poisoned receiver mutex), `shutdown_timeout` reports it as
-  timed out and its panic payload is lost. A guard struct whose `Drop` sends the
-  id would cover both exits.
 - Abandoned workers keep running until the process exits, which kills them
   mid-request.
 - Only `q` on stdin triggers shutdown. Ctrl-C (SIGINT/SIGTERM) is not handled.
@@ -156,9 +153,9 @@ These are deliberate and documented rather than overlooked:
 
 Roughly in the order I'm interested in them:
 
-1. **Close the loose ends above.** The worker guard struct and building the pool
-   before spawning workers are the most instructive, and both are good
-   exercises in `Drop` and RAII.
+1. **Close the loose ends above.** The worker guard struct is done. Building the
+   pool before spawning workers is next, and is another good exercise in
+   `Drop` and RAII.
 2. **Signal handling.** Graceful shutdown on Ctrl-C. Plain std needs `unsafe`
    FFI and a `static AtomicBool`. The `ctrlc` crate is the usual shortcut, but
    I'd only reach for it deliberately, since the project avoids dependencies.
