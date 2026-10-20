@@ -58,6 +58,5 @@ Run the tests with `cargo test`.
 
 ## More
 
-- [`ROADMAP.md`](ROADMAP.md): planned work.
 - [`CLAUDE.md`](CLAUDE.md): design notes, known loose ends and working
   conventions (written for Claude Code, but readable as a design record).

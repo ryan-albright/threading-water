@@ -3,8 +3,8 @@
 The multithreaded web server from the final chapter of the Brown edition of
 *The Rust Programming Language* (https://rust-book.cs.brown.edu/), iterated on
 by the author beyond the book. See `README.md` for what it does, how to run it
-and the file layout, and `ROADMAP.md` for planned work. This file holds what
-Claude needs that those do not: how to help, design decisions, and conventions.
+and the file layout. Planned work is tracked outside the repo; ask the author.
+This file holds what Claude needs that README does not: how to help, design decisions, and conventions.
 
 Package `server` is both a binary and a library (`src/main.rs` imports
 `server::ThreadPool`). The HTML pages are read by relative path, so the binary
@@ -52,13 +52,24 @@ truth for everything else.
   workers it heard from are safe to `join`, the rest are *abandoned* (handle
   dropped, thread detached, since std cannot cancel a thread). Queued jobs still
   run first, so the deadline also bounds a backlog.
+- **Partial `build` failure.** `build` constructs the `ThreadPool` first (empty
+  `workers`) and pushes each `Worker` into it, so if worker 3 of 4 cannot spawn,
+  the `?` drops the pool and `Drop` joins the workers that did start. This is
+  untested because spawn failure is hard to trigger on demand.
 - **Error convention.** `PoolFailure::Display` describes only its own layer; the
   cause is exposed through `source()` and whoever reports the error walks the
   chain. `From<io::Error>` maps to `Creation`.
-- **Accept loop.** The listener is non-blocking and polls an `AtomicBool`,
-  sleeping 50 ms on `WouldBlock`, because std's `accept()` has no timeout and
-  cannot be woken from another thread. The stdin thread sets the flag on `q`, a
-  read error, and EOF.
+- **Accept loop.** The listener is non-blocking and polls a `static
+  SHUTDOWN_REQUESTED: AtomicBool`, sleeping 50 ms on `WouldBlock`, because std's
+  `accept()` has no timeout and cannot be woken from another thread. The stdin
+  thread sets the flag on `q`, a read error, and EOF.
+- **Signals.** `main` registers `handler` for SIGINT and SIGTERM through a
+  hand-declared `unsafe extern "C" fn signal`, before spawning any thread. The
+  flag is a `static` because a handler cannot capture; the handler does one
+  atomic store, the only async-signal-safe work it may do. The signal numbers
+  (2 and 15) are the Linux values. `signal` returns `SIG_ERR` (`usize::MAX`)
+  on failure; `main` checks for it, reports `io::Error::last_os_error()` and
+  exits with code 1.
 - **No shutdown route, on purpose.** Anyone who can reach the port could stop the
   server, so the trigger is out of band (stdin).
 - **Shutdown limit vs `/sleep`.** `/sleep` takes 5 s, so a shutdown limit shorter
@@ -73,17 +84,12 @@ Deliberate, not bugs to fix unprompted:
   that workers survive panics and `build` rejects size 0. Its meaning needs a
   design decision. `ShuttingDown` is live: `execute` returns it after a shutdown
   has taken the job sender.
-- If `build` fails partway (e.g. worker 3 of 4 cannot spawn), the already spawned
-  workers are not joined. The sender is dropped on the early return, so they exit
-  on their own, but they are detached. Constructing the `ThreadPool` first and
-  pushing workers into it would let `Drop` join them.
 - Abandoned workers are not cancelled. They keep running until the process
   exits, which kills them mid-request.
-- Only `q` on stdin triggers shutdown. SIGINT/SIGTERM (Ctrl-C) are not handled;
-  that needs `unsafe` FFI (`signal`, a `static AtomicBool`) or a crate such as
-  `ctrlc`, and is deferred until the author asks for it.
+- `signal` is the old BSD/glibc interface. `sigaction` would be the more
+  portable choice but needs a `struct` layout declared by hand.
 - `main.rs` has no automated tests. Check shutdown by hand: `cargo run`, then
-  `curl localhost:7878/sleep &`, then type `q`.
+  `curl localhost:7878/sleep &`, then type `q` or press Ctrl-C.
 
 ## Testing
 
