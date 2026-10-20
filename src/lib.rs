@@ -72,17 +72,19 @@ impl ThreadPool {
             let (tx, rx) = mpsc::channel();
             let (done_tx, done_rx) = mpsc::channel();
             let rx = Arc::new(Mutex::new(rx));
-            let mut workers = Vec::with_capacity(size);
-
-            for id in 0..size {
-                workers.push(Worker::new(id, Arc::clone(&rx), done_tx.clone())?);
-            }
-
-            Ok(ThreadPool {
+            let workers = Vec::with_capacity(size);
+            let mut pool = ThreadPool {
                 workers,
                 job_sender: Some(tx),
                 done_receiver: done_rx,
-            })
+            };
+
+            for id in 0..size {
+                pool.workers
+                    .push(Worker::new(id, Arc::clone(&rx), done_tx.clone())?);
+            }
+
+            Ok(pool)
         }
     }
 
@@ -182,9 +184,9 @@ struct DoneGuard {
 
 impl Drop for DoneGuard {
     fn drop(&mut self) {
-        if let Err(_) = self.sender.send(self.id) {
+        if self.sender.send(self.id).is_err() {
             let id = self.id;
-                eprintln!("worker {id}: pool stopped listening")
+            eprintln!("worker {id}: pool stopped listening")
         }
     }
 }

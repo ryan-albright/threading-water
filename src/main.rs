@@ -4,15 +4,22 @@ use std::{
     io::{self, BufReader, prelude::*},
     net::{TcpListener, TcpStream},
     process,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
     thread::{self, sleep},
     time::Duration,
 };
 
 use server::ThreadPool;
+
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handler(_signum: i32) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+unsafe extern "C" {
+    fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
+}
 
 fn main() {
     let port = "127.0.0.1:7878";
@@ -37,32 +44,43 @@ fn main() {
         }
     };
 
-    let shutdown_requested: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     // optional for linux systems
     if let Err(e) = listener.set_nonblocking(true) {
         eprintln!("Failed to set non-blocking: {e}");
         process::exit(1)
     }
 
-    let for_thread = shutdown_requested.clone();
-    thread::spawn(move || {
+    // linux values
+    const SIGINT: i32 = 2;
+    const SIGTERM: i32 = 15;
+    const SIG_ERR: usize = usize::MAX;
+    for sig in [SIGINT, SIGTERM] {
+        let previous = unsafe { signal(sig, handler) };
+        if previous == SIG_ERR {
+            let recent_err = io::Error::last_os_error();
+            eprintln!("Failed to install handler for signal {sig}: {recent_err}");
+            process::exit(1)
+        }
+    }
+
+    thread::spawn(|| {
         let lines = io::stdin().lines();
         for line in lines {
             match line {
                 Ok(l) => {
                     if l.trim() == "q" {
-                        for_thread.store(true, Ordering::Relaxed)
+                        SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed)
                     };
                 }
                 Err(_) => {
-                    for_thread.store(true, Ordering::Relaxed);
+                    SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
                 }
             }
         }
-        for_thread.store(true, Ordering::Relaxed);
+        SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
     });
 
-    while !shutdown_requested.load(Ordering::Relaxed) {
+    while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((socket, _)) => {
                 if let Err(e) = pool.execute(|| handle_connection(socket)) {
