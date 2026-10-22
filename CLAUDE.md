@@ -59,6 +59,13 @@ truth for everything else.
 - **Error convention.** `PoolFailure::Display` describes only its own layer; the
   cause is exposed through `source()` and whoever reports the error walks the
   chain. `From<io::Error>` maps to `Creation`.
+- **`execute` and a failed `send`.** `execute` returns `ShuttingDown` once a
+  shutdown has taken the job sender. A failed `send` is not an error variant but
+  an `.expect`: it needs every worker to have dropped its receiver, and workers
+  only exit when the sender is dropped (which `execute` reports first), since
+  jobs run inside `catch_unwind` and the mutex guard is released before the job
+  runs, so nothing poisons it. A panic here means that invariant broke. The old
+  `NoWorkers` variant was removed for being unreachable.
 - **Accept loop.** The listener is non-blocking and polls a `static
   SHUTDOWN_REQUESTED: AtomicBool`, sleeping 50 ms on `WouldBlock`, because std's
   `accept()` has no timeout and cannot be woken from another thread. The stdin
@@ -80,10 +87,6 @@ truth for everything else.
 
 Deliberate, not bugs to fix unprompted:
 
-- `PoolFailure::NoWorkers` is effectively unreachable through the public API now
-  that workers survive panics and `build` rejects size 0. Its meaning needs a
-  design decision. `ShuttingDown` is live: `execute` returns it after a shutdown
-  has taken the job sender.
 - Abandoned workers are not cancelled. They keep running until the process
   exits, which kills them mid-request.
 - `signal` is the old BSD/glibc interface. `sigaction` would be the more

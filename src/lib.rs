@@ -27,7 +27,6 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 pub enum PoolFailure {
     InvalidSize,
     Creation(io::Error),
-    NoWorkers,
     ShuttingDown,
 }
 
@@ -36,7 +35,6 @@ impl fmt::Display for PoolFailure {
         match self {
             PoolFailure::InvalidSize => write!(f, "Pool size cannot be zero"),
             PoolFailure::Creation(_) => write!(f, "Pool instantiation failed"),
-            PoolFailure::NoWorkers => write!(f, "No workers in pool"),
             PoolFailure::ShuttingDown => write!(f, "Pool shutting down"),
         }
     }
@@ -95,7 +93,11 @@ impl ThreadPool {
         let job = Box::new(f);
 
         match self.job_sender.as_ref() {
-            Some(s) => s.send(job).map_err(|_| PoolFailure::NoWorkers),
+            Some(s) => {
+                s.send(job)
+                    .expect("workers hold the receiver until the sender is dropped");
+                Ok(())
+            }
             None => Err(PoolFailure::ShuttingDown),
         }
     }
