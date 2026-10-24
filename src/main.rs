@@ -1,4 +1,5 @@
 use std::{
+    env::{self, var},
     error::Error,
     fs,
     io::{self, BufReader, prelude::*},
@@ -22,8 +23,24 @@ unsafe extern "C" {
 }
 
 fn main() {
-    let port = "127.0.0.1:7878";
-    let listener = match TcpListener::bind(port) {
+    let port_number: u16 = match var("SERVER_PORT") {
+        Ok(p) => match str::parse(&p) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("SERVER_PORT is not valid: {p}");
+                process::exit(1)
+            }
+        },
+        Err(env::VarError::NotPresent) => 7878,
+        Err(env::VarError::NotUnicode(bad_port)) => {
+            eprintln!("SERVER_PORT is not valid Unicode: {:?}", bad_port);
+            process::exit(1)
+        }
+    };
+
+    let port = format!("127.0.0.1:{port_number}");
+
+    let listener = match TcpListener::bind(&port) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("Unable to bind at {port} {e}");
