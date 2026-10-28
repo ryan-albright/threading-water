@@ -48,6 +48,14 @@ fn main() {
         }
     };
 
+    match listener.local_addr() {
+        Ok(address) => println!("Listening on {}", address),
+        Err(e) => {
+            eprintln!("Unable to retrive address: {e}");
+            process::exit(1)
+        }
+    };
+
     let mut pool = match ThreadPool::build(4) {
         Ok(p) => p,
         Err(e) => {
