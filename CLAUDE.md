@@ -82,6 +82,11 @@ truth for everything else.
 - **Shutdown limit vs `/sleep`.** `/sleep` takes 5 s, so a shutdown limit shorter
   than that abandons an in-flight `/sleep` request and `main` exits with code 1.
   The limit is set in `main.rs`.
+- **Port and the ready line.** `SERVER_PORT` is an optional `u16` (default 7878;
+  `0` means any free port). A bad or non-Unicode value exits with code 1. After
+  binding, `main` prints `Listening on <addr>` to stdout, using the address the
+  listener reports from `local_addr`. `tests/server.rs` parses that line to learn
+  the port, so keep the wording stable.
 
 ## Known loose ends
 
@@ -91,8 +96,11 @@ Deliberate, not bugs to fix unprompted:
   exits, which kills them mid-request.
 - `signal` is the old BSD/glibc interface. `sigaction` would be the more
   portable choice but needs a `struct` layout declared by hand.
-- `main.rs` has no automated tests. Check shutdown by hand: `cargo run`, then
-  `curl localhost:7878/sleep &`, then type `q` or press Ctrl-C.
+- `println!` panics if stdout is a closed pipe (`main` and the workers print).
+  `cargo run | head -1`, or a test that drops the child's stdout reader, kills
+  the server this way.
+- `tests/server.rs` covers `q` on stdin but not SIGINT or SIGTERM. Check those by
+  hand: `cargo run`, then `curl localhost:7878/sleep &`, then press Ctrl-C.
 
 ## Testing
 
@@ -137,3 +145,30 @@ fails the stuck and separates tests; treating every worker as unfinished fails
 the happy-path and separates tests. If `shutdown_timeout` regresses to a loop
 whose error arms do not `break`, they hang instead of failing; running the call
 on a helper thread and waiting with `recv_timeout` would fix that (not done yet).
+
+### Integration tests
+
+`tests/server.rs` runs the real binary (`CARGO_BIN_EXE_server`) from the crate
+root with `SERVER_PORT=0`, so parallel tests cannot share a port. (Picking a
+free port, closing it and handing it to the child is racy: another test can
+take it in between, and a connect probe then succeeds against the wrong server.)
+
+- `ServerProcess` owns the `Child` and its three pipes, and kills and waits in
+  `Drop`. It is built *before* waiting for the ready line, so a panic during
+  startup still cleans up the child.
+- `start_server` reads the `Listening on` line on a helper thread and waits with
+  `recv_timeout`. A silent server fails with a message instead of hanging, and a
+  dead reader thread reports `Disconnected`. Checked by mutation: removing the
+  `println!` in `main.rs` fails after the limit and leaves no process behind.
+- Never drop the child's stdout reader while the server runs (see the `println!`
+  loose end). The `BufReader` sits in an `Option` so the helper thread can take it
+  and send it back; read it with `as_mut()`, not `take()`.
+- Keep the child's stdin open for the whole test: EOF on it triggers shutdown.
+  Send `"q\n"` with the newline, because the server reads whole lines.
+- `wait_for_exit` polls `try_wait` against a deadline. Read stdout and stderr only
+  after the process has exited, so `read_to_string` reaches EOF instead of
+  blocking. Diagnostics such as "timed out; job abandoned" go to stderr.
+- The in-flight `/sleep` test sends `/sleep` and keeps the stream open, then does
+  a `GET /` and waits for its reply. The accept loop takes connections in order,
+  so that reply proves `/sleep` was accepted first. Then it sends `q` and expects
+  exit code 1.

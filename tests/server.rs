@@ -2,7 +2,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpStream},
     process::{self, Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::mpsc::{self, RecvTimeoutError},
     thread::{self, sleep},
     time::{Duration, Instant},
 };
@@ -11,7 +11,7 @@ struct ServerProcess {
     child: Child,
     address: SocketAddr,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: Option<BufReader<ChildStdout>>,
     stderr: ChildStderr,
 }
 
@@ -34,7 +34,7 @@ fn start_server() -> ServerProcess {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Server start should succeed");
+        .expect("Server binary should open");
 
     let stdin = child.stdin.take().expect("stdin should pipe");
     let stdout = child.stdout.take().expect("stdout should pipe");
@@ -43,35 +43,37 @@ fn start_server() -> ServerProcess {
         child,
         address: placeholder_address,
         stdin,
-        stdout: BufReader::new(stdout),
+        stdout: Some(BufReader::new(stdout)),
         stderr,
     };
 
-    let mut bind_confirmation = String::new();
-    // let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel::<(BufReader<ChildStdout>, String)>();
 
-    // tx.send(move ||
-    //     process
-    //     .stdout
-    //     .read_line(&mut bind_confirmation)
-    //     .expect("Read line should succeed")
-    // );
-
-    // let start_confimration = rx.recv_timeout(TIME_LIMIT);
-
-    process
+    let mut reader = process
         .stdout
-        .read_line(&mut bind_confirmation)
-        .expect("Read line should succeed");
+        .take()
+        .expect("Server stdout should not already be taken");
 
-    let bound_address: SocketAddr = bind_confirmation
-        .trim()
-        .strip_prefix("Listening on ")
-        .expect("Port should not be none")
-        .parse()
-        .expect("Port should parse");
+    thread::spawn(move || {
+        let mut server_output = String::new();
 
-    process.address = bound_address;
+        reader
+            .read_line(&mut server_output)
+            .expect("Should read server's first stdout line");
+
+        let _ = tx.send((reader, server_output));
+    });
+
+    let (reader, bind_confirmation) = match rx.recv_timeout(TIME_LIMIT) {
+        Ok(t) => t,
+        Err(RecvTimeoutError::Timeout) => {
+            panic!("Server did not print anything within {TIME_LIMIT:?}")
+        }
+        Err(RecvTimeoutError::Disconnected) => panic!("Reader thread ended without sending"),
+    };
+
+    process.address = parse_listening_line(&bind_confirmation);
+    process.stdout = Some(reader);
     process
 }
 
@@ -79,20 +81,20 @@ fn parse_listening_line(input: &str) -> SocketAddr {
     input
         .trim()
         .strip_prefix("Listening on ")
-        .expect("Prefix should match")
+        .unwrap_or_else(|| panic!("Prefix should match {input:?}"))
         .parse()
-        .expect("{:?}")
+        .unwrap_or_else(|_| panic!("Failed to parse {input:?}"))
 }
 
 impl ServerProcess {
     fn send(&self, path: &str) -> TcpStream {
-        let mut connection =
-            TcpStream::connect(self.address).expect("Server should accept connection");
+        let mut connection = TcpStream::connect(self.address)
+            .unwrap_or_else(|e| panic!("Server should accept connection at {}: {e}", self.address));
 
         let request = format!("GET {path} HTTP/1.1\r\n\r\n");
         connection
             .write_all(request.as_bytes())
-            .expect("Request should be accepted");
+            .expect("Should write request to server");
 
         connection
     }
@@ -103,7 +105,7 @@ impl ServerProcess {
         let mut response = String::new();
         connection
             .read_to_string(&mut response)
-            .expect("Read should succeed");
+            .expect("Should read full response");
 
         response
     }
@@ -111,7 +113,11 @@ impl ServerProcess {
     fn wait_for_exit(&mut self, time_limit: Duration) -> ExitStatus {
         let deadline = Instant::now() + time_limit;
         loop {
-            match self.child.try_wait().expect("try wait should succeed") {
+            match self
+                .child
+                .try_wait()
+                .expect("Polling server process should succeed")
+            {
                 Some(status) => return status,
                 None => {
                     if Instant::now() > deadline {
@@ -126,14 +132,16 @@ impl ServerProcess {
     fn write_stdin(&mut self, input: &str) {
         self.stdin
             .write_all(input.as_bytes())
-            .expect("stdin write should succeed");
+            .expect("Write to server's stdin should succeed");
     }
 
     fn read_stdout(&mut self) -> String {
         let mut output = String::new();
         self.stdout
+            .as_mut()
+            .expect("Server stdout should not already be taken")
             .read_to_string(&mut output)
-            .expect("stdout should be readable");
+            .expect("Should read stdout to EOF");
         output
     }
 
@@ -141,7 +149,7 @@ impl ServerProcess {
         let mut output = String::new();
         self.stderr
             .read_to_string(&mut output)
-            .expect("stderr should be readable");
+            .expect("Should read stderr to EOF");
         output
     }
 }
@@ -192,6 +200,7 @@ fn shutdown_abandons_in_flight_sleep_request() {
     );
 
     server_process.write_stdin("q\n");
+    // set to 3 seconds as the shutdown is limited to 2 seconds and the sleep request takes 5 seconds
     let status = server_process.wait_for_exit(Duration::from_secs(3));
     assert_eq!(status.code(), Some(1), "{status}");
 
