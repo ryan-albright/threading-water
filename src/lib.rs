@@ -235,6 +235,21 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    fn within<F, T>(time_limit: Duration, f: F) -> Result<T, RecvTimeoutError>
+    where
+        F: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce() -> T,
+    {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = f();
+            let _ = tx.send(result);
+        });
+
+        rx.recv_timeout(time_limit)
+    }
+
     #[test]
     fn worker_name_valid() {
         let (tx, rx) = mpsc::channel();
@@ -376,7 +391,11 @@ mod tests {
             let _ = gate_rx.recv();
         });
 
-        let report = pool.shutdown_timeout(Duration::from_millis(100));
+        let shutdown_time_limit = Duration::from_millis(100);
+        let report = within(Duration::from_millis(300), move || {
+            pool.shutdown_timeout(shutdown_time_limit)
+        })
+        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {shutdown_time_limit:?}"));
         assert_eq!(report.timed_out_workers, vec![0]);
         gate_tx.send(()).unwrap()
     }
@@ -396,7 +415,11 @@ mod tests {
             assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
         }
 
-        let report = pool.shutdown_timeout(Duration::from_secs(5));
+        let shutdown_time_limit = Duration::from_secs(5);
+        let report = within(Duration::from_millis(300), move || {
+            pool.shutdown_timeout(shutdown_time_limit)
+        })
+        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {shutdown_time_limit:?}"));
         assert!(report.timed_out_workers.is_empty());
         assert!(report.panicked_workers.is_empty());
     }
@@ -425,9 +448,11 @@ mod tests {
             .parse::<usize>()
             .unwrap();
 
-        // todo: call the shutdown in a seperate timeout to avoid test hanging in case loop is changed
-
-        let report = pool.shutdown_timeout(Duration::from_millis(100));
+        let shutdown_time_limit = Duration::from_millis(100);
+        let report = within(Duration::from_millis(300), move || {
+            pool.shutdown_timeout(shutdown_time_limit)
+        })
+        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {shutdown_time_limit:?}"));
         assert_eq!(report.timed_out_workers, vec![stuck_worker_id]);
         assert!(report.panicked_workers.is_empty());
 
