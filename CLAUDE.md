@@ -142,9 +142,11 @@ the stuck worker always waits out the whole limit.
 
 These tests were checked by mutation: dropping the push to `timed_out_workers`
 fails the stuck and separates tests; treating every worker as unfinished fails
-the happy-path and separates tests. If `shutdown_timeout` regresses to a loop
-whose error arms do not `break`, they hang instead of failing; running the call
-on a helper thread and waiting with `recv_timeout` would fix that (not done yet).
+the happy-path and separates tests. They call `shutdown_timeout` through the
+`within(limit, f)` test helper, which runs it on a helper thread and waits with
+`recv_timeout`, so a loop whose error arms do not `break` fails the stuck and
+separates tests instead of hanging them (the happy-path test never reaches
+those arms). Use a generous `within` limit compared with the shutdown limit.
 
 ### Integration tests
 

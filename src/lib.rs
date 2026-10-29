@@ -235,6 +235,13 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    const EVENT_WAIT: Duration = Duration::from_secs(1);
+    const SHORT_SHUTDOWN: Duration = Duration::from_millis(100);
+    const GENEROUS_SHUTDOWN: Duration = Duration::from_secs(5);
+    const SHUTDOWN_BUFFER: Duration = Duration::from_millis(200);
+
+    const SHUTDOWN_GUARD: Duration = SHORT_SHUTDOWN.saturating_add(SHUTDOWN_BUFFER);
+
     fn within<F, T>(time_limit: Duration, f: F) -> Result<T, RecvTimeoutError>
     where
         F: Send + 'static,
@@ -274,7 +281,7 @@ mod tests {
         _ = handle.join();
 
         let test_worker = Worker::new(0, rx, done_tx).unwrap();
-        assert_eq!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
+        assert_eq!(done_rx.recv_timeout(EVENT_WAIT).unwrap(), 0);
         assert!(test_worker.thread.join().is_err());
     }
 
@@ -300,7 +307,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         pool.execute(move || tx.send(()).unwrap()).unwrap();
-        let status = rx.recv_timeout(Duration::from_secs(1));
+        let status = rx.recv_timeout(EVENT_WAIT);
         assert!(status.is_ok());
     }
 
@@ -350,14 +357,14 @@ mod tests {
                 panic!("test: worker job panicking on purpose");
             })
             .unwrap();
-            let status = rx.recv_timeout(Duration::from_secs(1));
+            let status = rx.recv_timeout(EVENT_WAIT);
             assert!(status.is_ok());
         }
 
         let (tx, rx) = mpsc::channel();
         pool.execute(move || tx.send(()).unwrap())
             .expect("Pool should accept jobs");
-        let status = rx.recv_timeout(Duration::from_secs(1));
+        let status = rx.recv_timeout(EVENT_WAIT);
         assert!(status.is_ok());
     }
 
@@ -391,11 +398,10 @@ mod tests {
             let _ = gate_rx.recv();
         });
 
-        let shutdown_time_limit = Duration::from_millis(100);
-        let report = within(Duration::from_millis(300), move || {
-            pool.shutdown_timeout(shutdown_time_limit)
+        let report = within(SHUTDOWN_GUARD, move || {
+            pool.shutdown_timeout(SHORT_SHUTDOWN)
         })
-        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {shutdown_time_limit:?}"));
+        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {SHORT_SHUTDOWN:?}"));
         assert_eq!(report.timed_out_workers, vec![0]);
         gate_tx.send(()).unwrap()
     }
@@ -412,14 +418,13 @@ mod tests {
         }
 
         for _ in 0..WORKER_COUNT {
-            assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok());
+            assert!(rx.recv_timeout(EVENT_WAIT).is_ok());
         }
 
-        let shutdown_time_limit = Duration::from_secs(5);
-        let report = within(Duration::from_millis(300), move || {
-            pool.shutdown_timeout(shutdown_time_limit)
+        let report = within(SHUTDOWN_GUARD, move || {
+            pool.shutdown_timeout(GENEROUS_SHUTDOWN)
         })
-        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {shutdown_time_limit:?}"));
+        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {GENEROUS_SHUTDOWN:?}"));
         assert!(report.timed_out_workers.is_empty());
         assert!(report.panicked_workers.is_empty());
     }
@@ -441,18 +446,17 @@ mod tests {
             let _ = gate_rx.recv();
         });
 
-        let stuck_worker_name = name_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let stuck_worker_name = name_rx.recv_timeout(EVENT_WAIT).unwrap();
         let stuck_worker_id = stuck_worker_name
             .strip_prefix("worker ")
             .unwrap()
             .parse::<usize>()
             .unwrap();
 
-        let shutdown_time_limit = Duration::from_millis(100);
-        let report = within(Duration::from_millis(300), move || {
-            pool.shutdown_timeout(shutdown_time_limit)
+        let report = within(SHUTDOWN_GUARD, move || {
+            pool.shutdown_timeout(SHORT_SHUTDOWN)
         })
-        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {shutdown_time_limit:?}"));
+        .unwrap_or_else(|_| panic!("Server shutdown should not exceed {SHORT_SHUTDOWN:?}"));
         assert_eq!(report.timed_out_workers, vec![stuck_worker_id]);
         assert!(report.panicked_workers.is_empty());
 
