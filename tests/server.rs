@@ -87,11 +87,10 @@ fn parse_listening_line(input: &str) -> SocketAddr {
 }
 
 impl ServerProcess {
-    fn send(&self, path: &str) -> TcpStream {
+    fn send(&self, request: &str) -> TcpStream {
         let mut connection = TcpStream::connect(self.address)
             .unwrap_or_else(|e| panic!("Server should accept connection at {}: {e}", self.address));
 
-        let request = format!("GET {path} HTTP/1.1\r\n\r\n");
         connection
             .write_all(request.as_bytes())
             .expect("Should write request to server");
@@ -99,15 +98,34 @@ impl ServerProcess {
         connection
     }
 
-    fn get(&self, path: &str) -> String {
-        let mut connection = self.send(path);
-
+    fn read(&self, mut connection: TcpStream) -> String {
         let mut response = String::new();
         connection
             .read_to_string(&mut response)
             .expect("Should read full response");
 
         response
+    }
+
+    fn get(&self, path: &str) -> String {
+        let request = format!("GET {path} HTTP/1.1\r\n\r\n");
+        let connection = self.send(&request);
+        self.read(connection)
+    }
+
+    fn post(&self, path: &str, host: &str, body: &str) -> String {
+        let request = format!(
+            "POST {path} HTTP/1.1\r\n\
+            Host: {host}\r\n\
+            Content-Type: application/json\r\n\
+            Content-Length: {}\r\n\
+            \r\n\
+            {}",
+            body.len(),
+            body
+        );
+        let connection = self.send(&request);
+        self.read(connection)
     }
 
     fn wait_for_exit(&mut self, time_limit: Duration) -> ExitStatus {
@@ -191,7 +209,7 @@ fn q_input_shuts_down_server() {
 fn shutdown_abandons_in_flight_sleep_request() {
     let mut server_process = start_server();
 
-    let _slow_response = server_process.send("/sleep");
+    let _slow_response = server_process.send("GET /sleep HTTP/1.1\r\n\r\n");
     // Send a fast request to confirm the sleep request was received
     let fast_response = server_process.get("/");
     assert!(
@@ -209,4 +227,15 @@ fn shutdown_abandons_in_flight_sleep_request() {
         stderr_output.contains("timed out; job abandoned"),
         "{stderr_output}"
     );
+}
+
+#[test]
+fn post_echo_returns_request_body() {
+    let server_process = start_server();
+
+    let body = r#"{"name":"Dave"}"#;
+    let response = server_process.post("/echo", "localhost", body);
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains(body), "{response}");
 }
