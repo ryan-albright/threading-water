@@ -1,7 +1,8 @@
 use std::{
+    collections::HashMap,
     env::{self, var},
     error::Error,
-    fs,
+    fmt, fs,
     io::{self, BufReader, prelude::*},
     net::{TcpListener, TcpStream},
     process,
@@ -21,6 +22,9 @@ extern "C" fn handler(_signum: i32) {
 unsafe extern "C" {
     fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
 }
+
+const MAX_LINE: u64 = 8 * 1024;
+const MAX_BODY: u64 = 1024 * 1024;
 
 fn main() {
     let port_number: u16 = match var("SERVER_PORT") {
@@ -138,34 +142,143 @@ fn main() {
     }
 }
 
-fn handle_connection(mut stream: TcpStream) {
-    let buf_reader = BufReader::new(&stream);
+#[derive(Debug)]
+enum ParseError {
+    MissingMethod,
+    MissingPath,
+    MalformedHeader,
+    Io(io::Error),
+}
 
-    let request_line = match buf_reader.lines().next() {
-        Some(Ok(r)) => r,
-        Some(Err(r)) => {
-            eprintln!("unreadable request {r}");
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::MissingMethod => write!(f, "Method was not provided"),
+            ParseError::MissingPath => write!(f, "Path was not provided"),
+            ParseError::MalformedHeader => write!(f, "Header was missing ':'"),
+            ParseError::Io(_) => write!(f, "Failed to read request"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ParseError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for ParseError {
+    fn from(value: io::Error) -> Self {
+        ParseError::Io(value)
+    }
+}
+
+struct Request {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+}
+
+fn handle_connection(mut stream: TcpStream) {
+    let mut buf_reader = BufReader::new(&stream);
+    let request_iterator = buf_reader.by_ref().take(MAX_LINE).lines();
+
+    let request = match parse_request(request_iterator) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to parse request: {e}");
+            match e {
+                ParseError::Io(_) => {}
+                _ => {
+                    write_response(&mut stream, "HTTP/1.1 400 BAD REQUEST", "400.html");
+                }
+            }
             return;
         }
-        None => String::new(),
     };
 
-    let (status_line, filename) = match &request_line[..] {
-        "GET / HTTP/1.1" => ("HTTP/1.1 200 OK", "hello.html"),
-        "GET /sleep HTTP/1.1" => {
+    // let content_length = match headers
+    //     .get("content-length")
+    //     .unwrap_or(&"0".to_string())
+    //     .parse::<u64>() {
+    //         Ok(h) => h,
+    //         Err(h) => {
+    //             let status_line
+    //         }
+    //     };
+
+    // if content_length < MAX_BODY {
+    //     let mut body = Vec::with_capacity(content_length as usize);
+    //     // below read does not handle client sending less than promised
+    //     buf_reader
+    //         .by_ref()
+    //         .take(content_length)
+    //         .read_to_end(&mut body);
+    // }
+
+    let (status_line, filename) = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/") => ("HTTP/1.1 200 OK", "hello.html"),
+        ("GET", "/sleep") => {
             thread::sleep(Duration::from_secs(5));
             ("HTTP/1.1 200 OK", "hello.html")
         }
-        _ => ("HTTP/1.1 404 NOT FOUND", "404.html"),
+        ("GET", _) => ("HTTP/1.1 404 NOT FOUND", "404.html"),
+        ("POST", "/") => ("HTTP/1.1 200 OK", "hello.html"),
+        ("POST", "/sleep") => ("HTTP/1.1 405 METHOD NOT ALLOWED", "405.html"),
+        ("POST", "/echo") => ("HTTP/1.1 200 OK", "hello.html"),
+        ("POST", _) => ("HTTP/1.1 404 NOT FOUND", "404.html"),
+        (_, _) => ("HTTP/1.1 405 METHOD NOT ALLOWED", "405.html"),
     };
 
+    write_response(&mut stream, status_line, filename);
+}
+
+fn parse_request(
+    mut request_iterator: impl Iterator<Item = io::Result<String>>,
+) -> Result<Request, ParseError> {
+    let request_line = request_iterator.next().ok_or(ParseError::MissingMethod)??;
+
+    let mut request_line_iter = request_line.split_whitespace();
+    let method = request_line_iter
+        .next()
+        .ok_or(ParseError::MissingMethod)?
+        .to_string();
+    let path = request_line_iter
+        .next()
+        .ok_or(ParseError::MissingPath)?
+        .to_string();
+
+    let mut headers: HashMap<String, String> = HashMap::new();
+    for line in request_iterator {
+        let line = line?;
+        if line.is_empty() {
+            break;
+        }
+
+        let (name, val) = line.split_once(":").ok_or(ParseError::MalformedHeader)?;
+        let name_clean = name.trim().to_ascii_lowercase();
+        let val_clean = val.trim().to_string();
+        headers.insert(name_clean, val_clean);
+    }
+
+    Ok(Request {
+        method,
+        path,
+        headers,
+    })
+}
+
+fn write_response(stream: &mut TcpStream, status_line: &str, filename: &str) {
     let (status_line, contents) = match fs::read_to_string(filename) {
         Ok(f) => (status_line, f),
         Err(e) => {
             eprintln!("Internal server error {e}");
             (
                 "HTTP/1.1 500 Internal Server Error",
-                String::from("500 Internal Server Error"),
+                "500 Internal Server Error".to_string(),
             )
         }
     };
