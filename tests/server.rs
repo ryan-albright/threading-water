@@ -109,6 +109,13 @@ impl ServerProcess {
 
     fn get(&self, path: &str) -> String {
         let request = format!("GET {path} HTTP/1.1\r\n\r\n");
+        // let request = format!(
+        //         "GET {path} HTTP/1.1\r\n\
+        //         Host: {host}\r\n\
+        //         Accept: text/html\r\n\
+        //         Connection: close\r\n\
+        //         \r\n"
+        //     );
         let connection = self.send(&request);
         self.read(connection)
     }
