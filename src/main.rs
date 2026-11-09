@@ -6,6 +6,7 @@ use std::{
     io::{self, BufReader, prelude::*},
     net::{TcpListener, TcpStream},
     process,
+    str::FromStr,
     sync::atomic::{AtomicBool, Ordering},
     thread::{self, sleep},
     time::Duration,
@@ -145,6 +146,7 @@ fn main() {
 #[derive(Debug)]
 enum ParseError {
     MissingMethod,
+    UnknownMethod,
     MissingPath,
     MalformedHeader,
     // a followup is to split this error into an unparseable content length
@@ -157,6 +159,7 @@ impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParseError::MissingMethod => write!(f, "Method was not provided"),
+            ParseError::UnknownMethod => write!(f, "Supplied method is not supported"),
             ParseError::MissingPath => write!(f, "Path was not provided"),
             ParseError::MalformedHeader => write!(f, "Header was missing ':'"),
             ParseError::BadContentLength => {
@@ -183,9 +186,27 @@ impl From<io::Error> for ParseError {
 }
 
 struct Request {
-    method: String,
+    method: Method,
     path: String,
     headers: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+enum Method {
+    Get,
+    Post,
+}
+
+impl FromStr for Method {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "GET" => Ok(Method::Get),
+            "POST" => Ok(Method::Post),
+            _ => Err(ParseError::UnknownMethod),
+        }
+    }
 }
 
 fn handle_connection(mut stream: TcpStream) {
@@ -200,6 +221,11 @@ fn handle_connection(mut stream: TcpStream) {
         Err(e) => {
             eprintln!("Failed to parse request: {e}");
             match e {
+                ParseError::UnknownMethod => {
+                    let (status_line, body) =
+                        page_or_500("HTTP/1.1 405 METHOD NOT ALLOWED", "405.html");
+                    write_response(&mut stream, status_line, body);
+                }
                 ParseError::Io(_) => {}
                 _ => {
                     let (status_line, body) = page_or_500("HTTP/1.1 400 BAD REQUEST", "400.html");
@@ -236,18 +262,17 @@ fn handle_connection(mut stream: TcpStream) {
         return;
     }
 
-    let (status_line, body) = match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => page_or_500("HTTP/1.1 200 OK", "hello.html"),
-        ("GET", "/sleep") => {
+    let (status_line, body) = match (request.method, request.path.as_str()) {
+        (Method::Get, "/") => page_or_500("HTTP/1.1 200 OK", "hello.html"),
+        (Method::Get, "/sleep") => {
             thread::sleep(Duration::from_secs(5));
             page_or_500("HTTP/1.1 200 OK", "hello.html")
         }
-        ("GET", _) => page_or_500("HTTP/1.1 404 NOT FOUND", "404.html"),
-        ("POST", "/") => page_or_500("HTTP/1.1 200 OK", "hello.html"),
-        ("POST", "/sleep") => page_or_500("HTTP/1.1 405 METHOD NOT ALLOWED", "405.html"),
-        ("POST", "/echo") => ("HTTP/1.1 200 OK", body),
-        ("POST", _) => page_or_500("HTTP/1.1 404 NOT FOUND", "404.html"),
-        (_, _) => page_or_500("HTTP/1.1 405 METHOD NOT ALLOWED", "405.html"),
+        (Method::Get, _) => page_or_500("HTTP/1.1 404 NOT FOUND", "404.html"),
+        (Method::Post, "/") => page_or_500("HTTP/1.1 200 OK", "hello.html"),
+        (Method::Post, "/sleep") => page_or_500("HTTP/1.1 405 METHOD NOT ALLOWED", "405.html"),
+        (Method::Post, "/echo") => ("HTTP/1.1 200 OK", body),
+        (Method::Post, _) => page_or_500("HTTP/1.1 404 NOT FOUND", "404.html"),
     };
 
     write_response(&mut stream, status_line, body);
@@ -262,7 +287,7 @@ fn parse_request(
     let method = request_line_iter
         .next()
         .ok_or(ParseError::MissingMethod)?
-        .to_string();
+        .parse::<Method>()?;
     let path = request_line_iter
         .next()
         .ok_or(ParseError::MissingPath)?
