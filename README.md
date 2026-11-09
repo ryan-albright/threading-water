@@ -1,4 +1,4 @@
-# web_server
+# threading-water
 
 A multithreaded HTTP server written in Rust using only the standard library.
 It started as the final project of the Brown edition of
@@ -8,7 +8,7 @@ shutdown with a deadline, and a unit-test suite.
 
 It is also a learning project, my first in Rust past the book's small
 exercises, so the code favours clarity over cleverness and uses no external
-crates.
+crates. My end goal is a system I can use to explore property-based testing.
 
 ## Layout
 
@@ -60,6 +60,16 @@ Run the tests with `cargo test`.
 - **Graceful shutdown.** The accept loop is non-blocking and polls a flag set by
   a stdin-reading thread. `shutdown_timeout(Duration)` then drains the pool under
   one overall deadline and reports panicked and abandoned workers.
+
+## Acknowledgements
+
+The thread pool and the overall shape of the server follow the final project of
+the Brown edition of
+[*The Rust Programming Language*](https://rust-book.cs.brown.edu/), which is
+itself based on the original book by Steve Klabnik, Carol Nichols and
+contributors. Everything past the book's version (fallible construction, panic
+resilience, shutdown with a deadline, signal handling, the test suites) is my
+own extension. The book's text and code remain the work of their authors.
 
 ## More
 
