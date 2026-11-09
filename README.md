@@ -16,10 +16,15 @@ The crate is named `server` and is both a library and a binary.
 
 | Path | Role |
 | --- | --- |
-| `src/main.rs` | Binary. Accepts connections, routes requests, handles shutdown. |
-| `src/lib.rs` | Library. `ThreadPool`, `Worker`, `PoolFailure`, `ShutdownReport`, plus unit tests. |
-| `hello.html` | Response for `/` and `/sleep`. |
-| `404.html` | Response for any other path. |
+| `src/main.rs` | Binary. Accepts connections and handles shutdown. |
+| `src/lib.rs` | Library root: `mod` declarations and re-exports only. |
+| `src/pool.rs` | `ThreadPool`, `ShutdownReport`, shutdown. |
+| `src/worker.rs` | `Worker`, `DoneGuard`, `err_to_string`. |
+| `src/error.rs` | `PoolFailure`. |
+| `src/http.rs` | Request parsing, routing and responses (`handle_connection`). |
+| `tests/pool.rs` | Pool contract tests. |
+| `tests/server.rs` | Integration tests that run the binary. |
+| `pages/*.html` | Response pages (`hello`, `400`, `404`, `405`, `500`). |
 
 The HTML files are read by relative path, so **run the server from the crate
 root**.
@@ -34,9 +39,9 @@ The server listens on `127.0.0.1:7878`.
 
 | Request | Result |
 | --- | --- |
-| `GET /` | `hello.html` |
-| `GET /sleep` | Sleeps 5 seconds, then `hello.html` (simulates a slow request) |
-| anything else | `404.html` |
+| `GET /` | `pages/hello.html` |
+| `GET /sleep` | Sleeps 5 seconds, then `pages/hello.html` (simulates a slow request) |
+| anything else | `pages/404.html` |
 | page file missing on disk | `500` response |
 
 To stop it, type `q` and press Enter in the terminal where it is running.

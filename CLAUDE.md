@@ -104,9 +104,9 @@ Deliberate, not bugs to fix unprompted:
 
 ## Testing
 
-Unit tests live in `src/lib.rs` under `#[cfg(test)] mod tests`, which is
-the conventional Rust location for them and can see private items. Run with
-`cargo test`.
+Contract tests live in `tests/pool.rs` and use only the public API. Tests that
+need private access (thread names, `err_to_string`) stay in `#[cfg(test)] mod
+tests` beside their code in `src/worker.rs`. Run with `cargo test`.
 
 Tests are written against the real contract and drove the implementation:
 write the test, watch it fail for the right reason, then fix the code. When a
@@ -143,7 +143,7 @@ the stuck worker always waits out the whole limit.
 These tests were checked by mutation: dropping the push to `timed_out_workers`
 fails the stuck and separates tests; treating every worker as unfinished fails
 the happy-path and separates tests. They call `shutdown_timeout` through the
-`within(limit, f)` test helper, which runs it on a helper thread and waits with
+`within(limit, f)` helper in `tests/pool.rs`, which runs it on a helper thread and waits with
 `recv_timeout`, so a loop whose error arms do not `break` fails the stuck and
 separates tests instead of hanging them (the happy-path test never reaches
 those arms). Use a generous `within` limit compared with the shutdown limit.
