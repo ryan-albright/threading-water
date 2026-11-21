@@ -7,7 +7,7 @@ and the file layout. Planned work is tracked outside the repo; ask the author.
 This file holds what Claude needs that README does not: how to help, design decisions, and conventions.
 
 Package `server` is both a binary and a library (`src/main.rs` imports
-`server::ThreadPool`). The HTML pages are read by relative path, so the binary
+`server::ThreadPool`). The HTML pages in `pages/` are read by relative path, so the binary
 must run from the crate root.
 
 ## Who is working on it
@@ -87,6 +87,14 @@ truth for everything else.
   binding, `main` prints `Listening on <addr>` to stdout, using the address the
   listener reports from `local_addr`. `tests/server.rs` parses that line to learn
   the port, so keep the wording stable.
+- **HTTP layer.** `src/http.rs` parses by hand, so its limits matter. The
+  request line and headers share one `MAX_LINE` (8 KiB) budget, via `take`, and
+  the body is capped by `MAX_BODY` (1 MiB). `handle_connection` sets a 1 s read
+  timeout. `ParseError::UnknownMethod` answers 405, the other parse errors and a
+  bad `Content-Length` answer 400, and `ParseError::Io` sends no response because
+  the client is probably gone. `page_or_500` turns an unreadable page file into a
+  500, so a missing page never panics a worker. Only GET and POST exist
+  (`Method`), and `POST /echo` returns the body as-is.
 
 ## Known loose ends
 
@@ -99,12 +107,18 @@ Deliberate, not bugs to fix unprompted:
 - `println!` panics if stdout is a closed pipe (`main` and the workers print).
   `cargo run | head -1`, or a test that drops the child's stdout reader, kills
   the server this way.
+- `http.rs` has no unit tests. The routes are covered only by the few
+  integration tests (`/`, a 404, `/echo`), not 400, 405, 500 or the size limits.
+- A client that sends less body than its `Content-Length` promised gets a 500
+  from `handle_connection`. A 408 would fit better but needs `pages/408.html`.
+- Responses carry no `Content-Type`, and `write_response` is where it would go.
 - `tests/server.rs` covers `q` on stdin but not SIGINT or SIGTERM. Check those by
   hand: `cargo run`, then `curl localhost:7878/sleep &`, then press Ctrl-C.
 
 ## Testing
 
-Contract tests live in `tests/pool.rs` and use only the public API. Tests that
+Contract tests live in `tests/pool.rs` and use only the public API (the
+binary-level tests are under *Integration tests* below). Tests that
 need private access (thread names, `err_to_string`) stay in `#[cfg(test)] mod
 tests` beside their code in `src/worker.rs`. Run with `cargo test`.
 

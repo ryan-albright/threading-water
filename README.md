@@ -4,15 +4,14 @@ A multithreaded HTTP server written in Rust using only the standard library.
 It started as the final project of the Brown edition of
 [*The Rust Programming Language*](https://rust-book.cs.brown.edu/) and has been
 extended beyond the book: fallible construction, panic resilience, graceful
-shutdown with a deadline, and a unit-test suite.
+shutdown with a deadline, a hand-rolled HTTP layer, and unit and integration
+tests.
 
 It is also a learning project, my first in Rust past the book's small
-exercises, so the code favours clarity over cleverness and uses no external
+exercises, so the code favors clarity over cleverness and uses no external
 crates. My end goal is a system I can use to explore property-based testing.
 
 ## Layout
-
-The crate is named `server` and is both a library and a binary.
 
 | Path | Role |
 | --- | --- |
@@ -26,8 +25,8 @@ The crate is named `server` and is both a library and a binary.
 | `tests/server.rs` | Integration tests that run the binary. |
 | `pages/*.html` | Response pages (`hello`, `400`, `404`, `405`, `500`). |
 
-The HTML files are read by relative path, so **run the server from the crate
-root**.
+The `pages/` files are read by relative path, so **run the server from the crate
+root**. The crate is named `server`.
 
 ## Running it
 
@@ -35,18 +34,36 @@ root**.
 cargo run
 ```
 
-The server listens on `127.0.0.1:7878`.
+The server listens on `127.0.0.1:7878` and prints `Listening on <addr>` once it
+is bound. Set `SERVER_PORT` to use another port (`0` picks any free one):
+
+```
+SERVER_PORT=8080 cargo run
+```
+
+A value that is not a valid port exits with code 1.
 
 | Request | Result |
 | --- | --- |
 | `GET /` | `pages/hello.html` |
 | `GET /sleep` | Sleeps 5 seconds, then `pages/hello.html` (simulates a slow request) |
-| anything else | `pages/404.html` |
+| `GET` anything else | `pages/404.html` |
+| `POST /` | `pages/hello.html` |
+| `POST /echo` | `200` with the request body echoed back |
+| `POST /sleep` | `405` (`pages/405.html`) |
+| `POST` anything else | `pages/404.html` |
+| any other method | `405` (`pages/405.html`) |
+| malformed request line or headers, bad or oversized `Content-Length` | `400` (`pages/400.html`) |
 | page file missing on disk | `500` response |
 
-To stop it, type `q` and press Enter in the terminal where it is running.
-End-of-file on stdin also stops it, so running with stdin closed
-(`< /dev/null`, `nohup`, some background jobs) shuts it down immediately.
+Request lines and headers are capped at 8 KiB in total and bodies at 1 MiB. A
+connection that stalls for more than a second while the server reads it is
+dropped.
+
+To stop it, type `q` and press Enter in the terminal where it is running, or
+send SIGINT (Ctrl-C) or SIGTERM. End-of-file on stdin also stops it, so running
+with stdin closed (`< /dev/null`, `nohup`, some background jobs) shuts it down
+immediately.
 
 Run the tests with `cargo test`.
 
@@ -58,18 +75,8 @@ Run the tests with `cargo test`.
 - **Errors, not panics.** `ThreadPool::build` and `execute` return
   `Result<_, PoolFailure>`, and the binary has no `.unwrap()` on I/O.
 - **Graceful shutdown.** The accept loop is non-blocking and polls a flag set by
-  a stdin-reading thread. `shutdown_timeout(Duration)` then drains the pool under
+  a stdin-reading thread or by the SIGINT/SIGTERM handler (Linux only). `shutdown_timeout(Duration)` then drains the pool under
   one overall deadline and reports panicked and abandoned workers.
-
-## Acknowledgements
-
-The thread pool and the overall shape of the server follow the final project of
-the Brown edition of
-[*The Rust Programming Language*](https://rust-book.cs.brown.edu/), which is
-itself based on the original book by Steve Klabnik, Carol Nichols and
-contributors. Everything past the book's version (fallible construction, panic
-resilience, shutdown with a deadline, signal handling, the test suites) is my
-own extension. The book's text and code remain the work of their authors.
 
 ## More
 
