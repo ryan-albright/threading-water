@@ -252,6 +252,23 @@ response_tests! {
 }
 
 #[test]
+fn oversized_header_returns_400_page() {
+    let server_process = start_server();
+
+    let big_value = "d".repeat(10 * 1024);
+    let request = format!("GET / HTTP/1.1\r\nX-Big: {big_value}\r\n\r\n");
+
+    let connection = server_process.send(&request);
+    let response = server_process.read(connection);
+    
+    assert!(response.starts_with("HTTP/1.1 400 BAD REQUEST"), "{response}");
+    assert!(
+        response.contains("<p>Sorry, I can't read your request.</p>"),
+        "{response}"
+    );
+} 
+
+#[test]
 fn q_input_shuts_down_server() {
     let mut server_process = start_server();
 
