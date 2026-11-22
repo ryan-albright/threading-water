@@ -179,6 +179,11 @@ impl ServerProcess {
     }
 }
 
+fn assert_response(response: &str, expected_status_line: &str, body_contains: &str) {
+    assert!(response.starts_with(expected_status_line), "{response}");
+    assert!(response.contains(body_contains), "{response}");
+}
+
 #[test]
 fn get_root_returns_hello_page() {
     let server_process = start_server();
@@ -198,6 +203,52 @@ fn bad_get_returns_404_page() {
         response.contains("<p>Sorry, I don't know what you're asking for.</p>"),
         "{response}"
     );
+}
+
+macro_rules! response_tests{
+    ( $( $name:ident, $request:expr, $status_line:expr, $body_snippet: expr ),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                let server_process = start_server();
+                let connection = server_process.send($request);
+                let response = server_process.read(connection);
+                assert_response(&response, $status_line, $body_snippet);
+            }
+        )*
+    };
+}
+
+response_tests! {
+    unknown_method_returns_405_page,
+    "DELETE / HTTP/1.1\r\n\r\n",
+    "HTTP/1.1 405 METHOD NOT ALLOWED",
+    "<p>Sorry, I don't support this method.</p>",
+
+    post_to_sleep_returns_405_page,
+    "POST /sleep HTTP/1.1\r\n\r\n",
+    "HTTP/1.1 405 METHOD NOT ALLOWED",
+    "<p>Sorry, I don't support this method.</p>",
+
+    header_without_colon_returns_400_page,
+    "GET / HTTP/1.1\r\nNoColon\r\n\r\n",
+    "HTTP/1.1 400 BAD REQUEST",
+    "<p>Sorry, I can't read your request.</p>",
+
+    missing_path_returns_400_page,
+    "GET\r\n\r\n",
+    "HTTP/1.1 400 BAD REQUEST",
+    "<p>Sorry, I can't read your request.</p>",
+
+    unparseable_content_length_returns_400_page,
+    "POST /echo HTTP/1.1\r\nContent-Length: abc\r\n\r\n",
+    "HTTP/1.1 400 BAD REQUEST",
+    "<p>Sorry, I can't read your request.</p>",
+
+    oversized_content_length_returns_400_page,
+    "POST /echo HTTP/1.1\r\nContent-Length: 2000000\r\n\r\n",
+    "HTTP/1.1 400 BAD REQUEST",
+    "<p>Sorry, I can't read your request.</p>",
 }
 
 #[test]
