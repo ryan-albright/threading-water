@@ -19,7 +19,8 @@ enum ParseError {
     MalformedHeader,
     // a followup is to split this error into an unparseable content length
     // versus a content length that is too long
-    BadContentLength,
+    MalformedContentLength,
+    OversizedRequest,
     Io(io::Error),
 }
 
@@ -30,8 +31,11 @@ impl fmt::Display for ParseError {
             ParseError::UnknownMethod => write!(f, "Supplied method is not supported"),
             ParseError::MissingPath => write!(f, "Path was not provided"),
             ParseError::MalformedHeader => write!(f, "Header was missing ':'"),
-            ParseError::BadContentLength => {
-                write!(f, "Content length was unparseable or too long")
+            ParseError::MalformedContentLength => {
+                write!(f, "Content length was unparseable")
+            }
+            ParseError::OversizedRequest => {
+                write!(f, "Request was too long")
             }
             ParseError::Io(_) => write!(f, "Failed to read request"),
         }
@@ -99,6 +103,7 @@ pub fn handle_connection(mut stream: TcpStream) {
                     let (status_line, body) =
                         page_or_500("HTTP/1.1 400 BAD REQUEST", "pages/400.html");
                     write_response(&mut stream, status_line, body);
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
             }
             return;
@@ -165,10 +170,12 @@ fn parse_request(
         .ok_or(ParseError::MissingPath)?
         .to_string();
 
+    let mut oversized_request = true;
     let mut headers: HashMap<String, String> = HashMap::new();
     for line in request_iterator {
         let line = line?;
         if line.is_empty() {
+            oversized_request = false;
             break;
         }
 
@@ -176,6 +183,10 @@ fn parse_request(
         let name_clean = name.trim().to_ascii_lowercase();
         let val_clean = val.trim().to_string();
         headers.insert(name_clean, val_clean);
+    }
+
+    if oversized_request {
+        return Err(ParseError::OversizedRequest);
     }
 
     Ok(Request {
@@ -195,13 +206,13 @@ fn get_content_length(
         .transpose()
     {
         Ok(l) => l.unwrap_or(0),
-        Err(_) => return Err(ParseError::BadContentLength),
+        Err(_) => return Err(ParseError::MalformedContentLength),
     };
 
     if content_length <= max_length {
         Ok(content_length)
     } else {
-        Err(ParseError::BadContentLength)
+        Err(ParseError::OversizedRequest)
     }
 }
 

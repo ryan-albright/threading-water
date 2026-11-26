@@ -260,13 +260,16 @@ fn oversized_header_returns_400_page() {
 
     let connection = server_process.send(&request);
     let response = server_process.read(connection);
-    
-    assert!(response.starts_with("HTTP/1.1 400 BAD REQUEST"), "{response}");
+
+    assert!(
+        response.starts_with("HTTP/1.1 400 BAD REQUEST"),
+        "{response}"
+    );
     assert!(
         response.contains("<p>Sorry, I can't read your request.</p>"),
         "{response}"
     );
-} 
+}
 
 #[test]
 fn q_input_shuts_down_server() {
